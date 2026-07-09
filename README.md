@@ -239,31 +239,6 @@ tickstream/
 
 ---
 
-## Interview Story Map
-
-| Interview Scenario | What I Built & Broke |
-|---|---|
-| Kafka duplicates / out-of-order | Killed consumer mid-batch; fixed with UUID upsert; per-key ordering via symbol partitioning |
-| Consumer lag explosion | Manufactured 100k backlog; measured recovery; partitions ceiling on parallelism |
-| Poison pill → DLQ | Built retry-with-limit + `trades.dlq` |
-| DB → Kafka reliability (outbox) | Built transactional outbox, killed relay mid-flight, verified zero loss |
-| Rate limiter coding Q | Sliding-log limiter is IN the repo as middleware |
-| MySQL slow at peak | EXPLAIN-driven index fixes + batch inserts, before/after numbers |
-| Cache stampede | Singleflight lock on query-api cache |
-| Timeout / retry storm | Backoff + jitter + budget in WS reconnect and API client |
-| Worker backlog (Python concurrency) | Bounded queue + pool sizing |
-| Prod debugging | Correlation IDs traced one event end-to-end through logs |
-
----
-
-## Resume Bullets (fill numbers after M4)
-
-- Engineered a real-time market-data pipeline (Python, Kafka, MySQL 8, Redis) ingesting live exchange WebSocket feeds at **[X]** events/sec sustained, with idempotent exactly-once processing via UUID-keyed upserts and manual offset management
-- Implemented transactional outbox, dead-letter topic with bounded retries, and a Redis sliding-window rate limiter; verified zero event loss under broker kill and consumer-crash fault injection
-- Cut p99 ingest-to-queryable latency from **[A]** to **[B]** ms by replacing row-at-a-time inserts with batched writes and EXPLAIN-driven composite indexes over **[N]**M rows
-
----
-
 ## License
 
 MIT
