@@ -38,3 +38,6 @@ htmlcov/
 
 # k6
 *.har
+CLAUDE.md
+.claude/
+.claude-flow/

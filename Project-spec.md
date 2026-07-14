@@ -1,77 +1,93 @@
-# Flagship Project Spec — "TickStream": Market-Data Ingestion Pipeline
+# Flagship Project Spec v2 — "TickStream": Market-Data Pipeline Built as a System-Design Artifact
 
-**Why this project:** YipitData's business is turning raw feeds into analytics. You build exactly that, using data you already understand (crypto market data), with the exact stack the friend named: **Python + Kafka + MySQL**. Every scenario tab in the interview doc maps to a component you built and broke.
+**Budget: 5-6 hrs/day → ~40 hrs of build time across 14 days.**
 
-**Repo name:** `tickstream` (public, on `trudransh`)
+**Show-off thesis:** interviewers are not impressed by boxes in a diagram — they're impressed by (1) measured numbers, (2) reproducible failure drills, (3) written design decisions with rejected alternatives. v2 is built so the REPO ITSELF answers interview questions before you open your mouth.
+
+**Repo:** `tickstream` (public, `trudransh`)
 
 ---
 
-## Architecture
+## Architecture v2
 
 ```
-Binance/Coinbase public WebSocket (real, free, high-volume)
+Binance/Coinbase public WebSocket (live, free, genuinely high-volume)
+        │  reconnect w/ backoff+jitter, heartbeat watchdog
+        ▼
+[ingest-svc]  Python asyncio ws client + FastAPI admin API
+  - normalize → event schema {event_uuid, symbol, ts_event, ts_ingest, price, qty}
+  - Redis sliding-window rate limiter middleware (Lua, atomic)
+  - graceful shutdown: SIGTERM → drain → flush producer
+        │  confluent-kafka, acks=all, enable.idempotence, linger/batch tuned
+        ▼
+[Kafka · KRaft]  trades.raw (6 partitions, keyed by symbol)
+  - trades.retry (bounded attempts) + trades.dlq
+  - lag exported to Prometheus
         │
         ▼
-[ingest-svc]  FastAPI + websocket client, Python
-  - normalizes trade events → JSON schema with event UUID
-  - Redis sliding-window rate limiter on admin/query endpoints
-  - transactional OUTBOX variant for API-originated writes
-        │  confluent-kafka producer, acks=all, idempotent producer
+[worker pool]  ★ THE CENTERPIECE: 3 switchable delivery modes (--mode flag)
+  1. at-most-once   (commit before process)   → demo: crash = data loss
+  2. at-least-once  (commit after process)    → demo: crash = duplicates
+  3. effectively-once (at-least-once + UUID idempotent upsert) → demo: crash = correct
+  - per-key ordered parallelism (workers hash-partitioned by symbol)
+  - bounded internal queue → measurable backpressure
+  - 1-min OHLCV windowed aggregation w/ late-event policy (event-time vs processing-time, watermark = 5s)
+        │  batched INSERT ... ON DUPLICATE KEY UPDATE
         ▼
-[Kafka]  1 broker KRaft, topic trades.raw (6 partitions, keyed by symbol)
-  - retry topic + dead-letter topic (trades.dlq)
-        │
+[MySQL 8 · primary + read REPLICA]
+  - trades (RANGE partitioned by day), candles_1m, outbox, dedupe design
+  - replication running in compose → demo real lag + read-your-writes fix
         ▼
-[worker pool]  Python consumers, manual offset commit
-  - idempotent upsert (event UUID unique key)
-  - aggregates 1-min OHLCV candles + rolling volume
-  - bounded internal queue → backpressure
-        │
-        ▼
-[MySQL 8]  trades (partitioned by day), candles_1m, outbox
-  - composite indexes designed via EXPLAIN, batch inserts
-        │
-        ▼
-[query-api]  FastAPI: top-N movers, per-symbol history
-  - Redis read-through cache (stampede-protected)
+[query-api]  FastAPI on the REPLICA
+  - top-N movers (index-backed ORDER BY LIMIT), keyset pagination
+  - Redis cache-aside w/ singleflight stampede guard + TTL jitter
+  - read-your-writes demo endpoint (pin-to-primary after write)
         +
-[observability]  JSON logs + correlation IDs, Prometheus, Grafana panel
+[obs]  JSON logs w/ correlation IDs end-to-end (HTTP → Kafka header → worker → DB row)
+       Prometheus (throughput, lag, p50/p95/p99, error rate) + Grafana dashboard (committed as JSON)
+        +
+[chaos/]  ★ make kill-broker · make kill-consumer-midbatch · make poison
+          make lag-storm · make replica-lag · make stampede
+          each script prints WHAT TO OBSERVE; results logged in RUNBOOK.md
+        +
+[docs/adr/]  ★ 6 one-page ADRs (decision + rejected alternative + why):
+  001 partition count & key choice        004 outbox vs dual-write
+  002 delivery semantics per mode         005 batch size vs latency tradeoff (with measured curve)
+  003 retry topic vs blocking (ordering)  006 replica reads + staleness handling
 ```
 
-All via one `docker-compose up`. No K8s — Docker Compose is defensible and honest.
+Everything: one `docker-compose up`. **Stretch (only if Day 12 is on schedule):** k8s/ dir with minikube manifests + probes + resource limits — deploy once, screenshot, done. Do NOT gold-plate this.
 
-## Milestones (match PREP_PLAN days)
+## Why this project shows off correctly
 
-| M | Day | Deliverable |
-|---|-----|-------------|
-| M1 | 3 | End-to-end flow: ws → Kafka → consumer → MySQL |
-| M2 | 4–6 | Idempotent consumer, worker pool + backpressure, rate limiter middleware |
-| M3 | 7–9 | DLQ + retry topic, failure RUNBOOK, outbox, Redis cache |
-| M4 | 10–11 | Load test numbers, metrics, testcontainers integration tests, README + diagram |
-
-## Interview story map (doc tab → what you did)
-
-| Doc scenario | Your lived answer |
+| Show-off asset | Interview effect |
 |---|---|
-| Kafka duplicates/out-of-order | Killed consumer mid-batch Day 4; fixed with UUID upsert; per-key ordering via symbol partitioning |
-| Consumer lag explosion | Manufactured 100k backlog Day 7; measured recovery; partitions ceiling on parallelism |
-| Poison pill → DLQ | Built retry-with-limit + trades.dlq Day 7 |
-| DB→Kafka reliability (outbox) | Built it Day 9, killed relay mid-flight, zero loss |
-| Rate limiter coding Q | Sliding-log limiter is IN the repo as middleware |
-| Mongo/MySQL slow at peak | EXPLAIN-driven index fixes + batch inserts, before/after numbers Day 10 |
-| Cache stampede | Singleflight lock on query-api cache Day 9 |
-| Timeout/retry storm | Backoff+jitter+budget in ws reconnect and API client Day 10 |
-| Worker backlog (Python concurrency) | Bounded queue + pool sizing Day 5 |
-| Prod debugging | Correlation IDs traced one event end-to-end through logs |
+| 3-mode delivery-semantics flag | Turns THE hardest Kafka question into a live demo you built. Nobody else in the pipeline has this |
+| chaos/ directory | "Have you handled failures?" → "Here are my seven reproducible ones, run them" |
+| ADRs with rejected alternatives | Senior signal: tradeoff thinking in writing (doc rubrics all score "discusses tradeoffs") |
+| Measured k6 curve (batch size vs p99) | Numbers over adjectives; feeds resume bullets |
+| Real replica + lag demo | microsystemDesign #6 answered from experience |
+| Correlation ID traced HTTP→Kafka→MySQL | The "3 prod debugging improvements" answer, implemented |
+| testcontainers integration tests | "I test against real brokers" — instant credibility |
 
-## Resume bullets (fill numbers after Day 10 — do NOT invent them)
+## Milestones (5-6 h/day; ~3h/day build share)
 
-- Engineered a real-time market-data pipeline (Python, Kafka, MySQL 8, Redis) ingesting live exchange WebSocket feeds at [X] events/sec sustained, with idempotent exactly-once processing via UUID-keyed upserts and manual offset management
-- Implemented transactional outbox, dead-letter topic with bounded retries, and a Redis sliding-window rate limiter; verified zero event loss under broker kill and consumer-crash fault injection
-- Cut p99 ingest-to-queryable latency from [A] to [B] ms by replacing row-at-a-time inserts with batched writes and EXPLAIN-driven composite indexes over [N]M rows
+| M | Days | Deliverable |
+|---|------|-------------|
+| M1 | 3 | E2E flow: ws → Kafka → single consumer → MySQL, compose up |
+| M2 | 4–6 | 3-mode delivery flag + crash demos · per-key ordered worker pool + bounded queue · Redis Lua rate limiter |
+| M3 | 7–9 | chaos/ scripts + RUNBOOK · retry topic + DLQ · outbox · MySQL replica + read-your-writes · cache + singleflight |
+| M4 | 10–12 | k6 load curve + batch tuning · Grafana dashboard · testcontainers tests · ADRs · README w/ diagram · (stretch: minikube) |
 
-## Guardrails
+## Resume bullets (fill AFTER measuring — brackets stay empty until k6 says otherwise)
 
-- Scope creep is the enemy: no auth, no frontend, no multi-broker cluster, one exchange feed is enough
-- If a day runs over, cut the Redis cache (Day 9 optional part) first, never the failure drills — drills are the interview value
-- Numbers must be measured, not estimated. Empty [X] brackets stay empty until k6 says otherwise
+- Built a real-time market-data pipeline (Python/asyncio, Kafka, MySQL 8 primary-replica, Redis) sustaining [X] events/sec from live exchange feeds, with switchable at-most-once / at-least-once / effectively-once delivery modes demonstrated under fault injection
+- Designed transactional outbox, bounded-retry DLQ, per-key ordered parallel consumers, and Lua-based sliding-window rate limiting; verified zero event loss across 7 scripted chaos scenarios (broker kill, mid-batch consumer crash, poison pill, replica lag)
+- Reduced p99 ingest-to-queryable latency [A]→[B] ms and raised throughput [C]→[D] events/sec via EXPLAIN-driven composite indexes, keyset pagination, and measured batch-size tuning over [N]M rows; instrumented end-to-end with correlation IDs, Prometheus, Grafana
+
+## Guardrails (tighter now — more hours = more scope-creep risk, not less)
+
+- The 3-mode flag, chaos/, and ADRs are the show-off core. If anything slips, cut the stretch K8s and the Grafana polish FIRST
+- No auth, no frontend, no schema registry, no multi-broker cluster, one exchange feed
+- Every chaos drill = 5 lines in RUNBOOK.md same day. Undocumented drill = didn't happen
+- Numbers measured, never estimated. An empty [X] on the resume is a task, not a blank to improvise
