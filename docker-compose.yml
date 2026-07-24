@@ -17,3 +17,21 @@ services:
 
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+
+  mysql:
+    image: mysql:8.0
+    container_name: tickstream-mysql
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: tickstream
+    volumes:
+      # 1. Runs our schema creation script on startup
+      - ./migrations/init.sql:/docker-entrypoint-initdb.d/init.sql
+      # 2. The volume that permanently saves our data!
+      - mysql_data:/var/lib/mysql 
+
+# We also have to declare the named volume at the very bottom of the file
+volumes:
+  mysql_data:

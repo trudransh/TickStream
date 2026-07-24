@@ -1,7 +1,10 @@
 {
   "venvPath": ".",
   "venv": ".venv",
+  "pythonPlatform": "Linux",
+  "pythonVersion": "3.12",
   "extraPaths": [
+    "src",
     ".venv/lib/python3.12/site-packages"
   ]
 }
